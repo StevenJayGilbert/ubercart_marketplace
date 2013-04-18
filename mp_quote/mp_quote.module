@@ -290,7 +290,7 @@ function mp_quote_quote($products, $details) {
     if (isset($pbv[$uid][0])) {
       $flatrate_name = 'flatrate_'. variable_get('mp_quote_flatrate_id', 1);
       $quote = uc_flatrate_quote($pbv[$uid][0], $details, array('id' => $flatrate_name));
-      if(empty($quote)) { // return if error retrieving quote
+      if(empty($quote) || !empty($quote['data']['error'])) { // return if error retrieving quote
         return $quote;
       }
       $sqr += $quote[0]['rate'];
@@ -300,7 +300,7 @@ function mp_quote_quote($products, $details) {
     // ===USPS QUOTE METHOD===
     if (isset($pbv[$uid][1])) {
       $quote = uc_usps_quote($pbv[$uid][1], $details, array('id' => 'usps'));
-      if(empty($quote)) { // return if error retrieving quote
+      if(empty($quote) || !empty($quote['data']['error'])) { // return if error retrieving quote
         return $quote;
       }
       $markup_rate = db_result(db_query("SELECT markup_rate FROM {mp_quote_sellers} WHERE uid = %d", $uid));
@@ -321,10 +321,27 @@ function mp_quote_quote($products, $details) {
  * Saves the shipping rates per seller to db
  */
 function mp_quote_order($op, &$order, $arg2)  {
-  if ($op == 'submit') {
-    foreach($_SESSION['mp_quote_rate'] as $uid=>$rate) {
-      db_query("INSERT INTO {mp_quote_shipping_rates} (uid, order_id, rate) VALUES (%d, %d, %f)", $uid, $order->order_id, $rate); 
-    }
-    unset($_SESSION['mp_quote_rate']);
-  }
+  switch ($op) {
+    case 'submit':
+      unset($_SESSION['mp_quote_rate']);
+    break;
+    case 'save':
+      db_query("DELETE FROM {mp_quote_shipping_rates} WHERE order_id = %d", $order->order_id);
+      if (module_exists('mp_line_item')) {
+        mp_line_item_delete_line_item(null, $order->order_id, null, 'shipping');
+      }
+      if (isset($_SESSION['mp_quote_rate'])) {
+        foreach($_SESSION['mp_quote_rate'] as $uid=>$rate) {
+          db_query("INSERT INTO {mp_quote_shipping_rates} (uid, order_id, rate) VALUES (%d, %d, %f)", $uid, $order->order_id, $rate); 
+          if (module_exists('mp_line_item')) {
+            mp_line_item_line_item_add($order->order_id, $uid, 'shipping', t('Shipping'), $rate, 1);           
+          }
+        }
+      }
+    case 'load':
+    break;
+    case 'delete':
+      db_query("DELETE FROM {mp_quote_shipping_rates} WHERE order_id = %d", $order->order_id);    
+    break;
+  }  
 }
