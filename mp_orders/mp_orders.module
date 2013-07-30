@@ -378,15 +378,19 @@ function mp_orders_fulfill($user) {
       array('data' => $order->delivery_last_name),
       array('data' => uc_currency_format($total)),
       array('data' => format_date($order->created, 'custom', variable_get('uc_date_format_default', 'm/d/Y'))),
-      array('data' => t($order->order_status))
+      array('data' => t($order->order_status)),
     );
     
     if ($mp_quote_present) {
       array_splice($rows[sizeof($rows) - 1], 4, 0, array('data' => uc_currency_format($shipping_total)));
+      $rows[sizeof($rows) - 1] = array(
+        'data' => $rows[sizeof($rows) - 1],
+        'class' => ($order->order_status == 'not complete') ? 'not-complete' : 'complete',  
+      );
     }   
   }
   
-  $output .= theme('table', $header, $rows) . theme('pager', NULL, 20, 0);
+  $output .= theme('table', $header, $rows, array('class' => 'view-sellers-orders')) . theme('pager', NULL, 20, 0);
   $output .= '<p>'. t('*The products listed for each order only include the products that you sell.  The total field doesn\'t represent what the customer actually paid, but rather the amount you will be paid for the order.') .'</p>';
 
   return $output;
