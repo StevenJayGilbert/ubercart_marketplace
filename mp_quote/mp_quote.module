@@ -150,7 +150,7 @@ function mp_quote_seller_settings($form_state, $account) {
   $form['default_address']['street1'] = uc_textfield(uc_get_field_name('street1'), $address->street1, FALSE, NULL, 64);
   $form['default_address']['street2'] = uc_textfield(uc_get_field_name('street2'), $address->street2, FALSE, NULL, 64);
   $form['default_address']['city'] = uc_textfield(uc_get_field_name('city'), $address->city, FALSE);
-  $form['default_address']['zone'] = uc_zone_select(uc_get_field_name('zone'), $address->zone, NULL, $country);
+  $form['default_address']['zone'] = uc_zone_select(uc_get_field_name('zone'), $address->zone, NULL, $address->country);
   $form['default_address']['postal_code'] = uc_textfield(uc_get_field_name('postal_code'), $address->postal_code, FALSE, NULL, 10, 10);
   $form['default_address']['country'] = uc_country_select(uc_get_field_name('country'), $address->country);
 
@@ -304,8 +304,9 @@ function mp_quote_quote($products, $details) {
         return $quote;
       }
       $markup_rate = db_result(db_query("SELECT markup_rate FROM {mp_quote_sellers} WHERE uid = %d", $uid));
-      $sqr += $quote[1]['rate'] + $markup_rate; // 1 = USPS Priority Mail Service Code (Ubercart)
-      $_SESSION['mp_quote_rate'][$uid] += $quote[1]['rate'] + $markup_rate;
+      $rate = array_shift($quote);
+      $sqr += $rate['rate'] + $markup_rate; // least expensive option
+      $_SESSION['mp_quote_rate'][$uid] += $rate['rate'] + $markup_rate;
     }
     
   }
