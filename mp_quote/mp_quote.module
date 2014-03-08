@@ -245,7 +245,15 @@ function mp_quote_shipping_method() {
     'quote' => array(
       'type' => 'order',
       'callback' => 'mp_quote_quote',
-      'accessorials' => array('Shipping' => t('Shipping')),
+      'accessorials' => array(
+        'Shipping' => t('Shipping'),
+        'first class' => mp_quote_label('first class'),
+        'priority mail' => mp_quote_label('priority mail'),
+        'express mail' => mp_quote_label('express mail'),  
+        'first class intl' => mp_quote_label('first class intl'),  
+        'priority mail intl' => mp_quote_label('priority mail intl'),   
+        'global express int' => mp_quote_label('global express intl'),         
+      ),
     ),
     'weight' => $weight['mp_quote'],
   );
@@ -272,7 +280,8 @@ function mp_quote_quote($products, $details) {
   // sort products into an array by vendor, so operations can be performed on a per vendor basis
   $pbv = array();
   foreach ($products as $product) {
-    $quote_method = db_result(db_query("SELECT quote_method FROM {mp_quote_products} WHERE nid = %d", $product->nid));
+    //$quote_method = db_result(db_query("SELECT quote_method FROM {mp_quote_products} WHERE nid = %d", $product->nid));
+    $quote_method = 1; // force all vendors to quote USPS
     $pbv[$product->uid][$quote_method][] = $product;
   }
   
@@ -299,21 +308,209 @@ function mp_quote_quote($products, $details) {
     
     // ===USPS QUOTE METHOD===
     if (isset($pbv[$uid][1])) {
-      $quote = uc_usps_quote($pbv[$uid][1], $details, array('id' => 'usps'));
+      $method = ($details['country'] == 840) ? 'usps' : 'usps_intl';
+      $quote = uc_usps_quote($pbv[$uid][1], $details, array('id' => $method));    
       if(empty($quote) || !empty($quote['data']['error'])) { // return if error retrieving quote
         return $quote;
       }
-      $markup_rate = db_result(db_query("SELECT markup_rate FROM {mp_quote_sellers} WHERE uid = %d", $uid));
-      $rate = array_shift($quote);
-      $sqr += $rate['rate'] + $markup_rate; // least expensive option
-      $_SESSION['mp_quote_rate'][$uid] += $rate['rate'] + $markup_rate;
-    }
-    
+      $markup = db_result(db_query("SELECT markup_rate FROM {mp_quote_sellers} WHERE uid = %d", $uid));
+      //add seller markup to quote
+      foreach ($quote as $key => $rate) {
+        if ($key == 'data') continue;
+        
+        $quote[$key]['rate'] = $rate['rate'] + $markup;
+        $quote[$key]['format'] = uc_price($rate['rate']);
+      }
+      //store so we can add seller lineitem later when order is saved
+      $_SESSION['mp_quote_rate'][$uid] = $quote;
+     
+    }    
   }
   
-  $quotes['Shipping'] = array('rate' => $sqr, 'format' => uc_currency_format($sqr), 'option_label' => t('Shipping'));
+  $best = mp_quote_best($_SESSION['mp_quote_rate']);
+  return $best['customer_quote'];
+}
+
+/*
+ * Helper function to calculate customer shipping options
+ *  based on best 1 day, 2 day and overall shipping options
+ * 
+ * @params qbv quotes by vendor array
+ * @return array('customer_quote', 'seller_best')
+ */
+function mp_quote_best($qbv) {
   
-  return $quotes;
+  $seller_best = array();
+  //group types
+  foreach ($qbv as $uid => $quote) {
+    foreach ($quote as $key => $rate) {
+      $qbv[$uid][$key]['class'] = mp_quote_usps_delivery_type($key);
+    }
+  }
+  
+  //best us options
+  $classes = array('first class', 'priority mail', 'express mail');
+  foreach($classes as $class) {
+    $best = mp_quote_faster($qbv, $class);
+    if (!empty($best)) $seller_best[$class] = $best; 
+  }
+
+  //best international options if no us options found
+  if (empty($seller_best)) {
+    $classes = array('first class intl', 'priority mail intl', 'global express intl');
+    foreach($classes as $class) {
+      $best = mp_quote_faster($qbv, $class);
+      if (!empty($best)) $seller_best[$class] = $best;   
+    }     
+  }
+ 
+  $customer_quote = array();
+  $sellers = count($qbv);
+  //format customer_quote
+  foreach ($seller_best as $class => $vendor_best_keys) {
+    if (count($vendor_best_keys) == $sellers) {
+      $has_class = false;
+      foreach ($vendor_best_keys as $uid => $key) {
+        if (!isset($customer_quote[$class])) {
+          $customer_quote[$class] = $qbv[$uid][$key];
+          $customer_quote[$class]['label'] = mp_quote_label($class);
+          $customer_quote[$class]['option_label'] = $customer_quote[$class]['label']. format_plural($customer_quote[$class]['count'], '', t(' (@count packages)')); 
+        }
+        else {
+          $customer_quote[$class]['rate'] += $qbv[$uid][$key]['rate'];
+          $customer_quote[$class]['format'] = uc_price($customer_quote[$class]['rate']);
+          $customer_quote[$class]['count'] += $qbv[$uid][$key]['count'];
+          $customer_quote[$class]['option_label'] = $customer_quote[$class]['label']. format_plural($customer_quote[$class]['count'], '', t(' (@count packages)'));        
+        }
+        
+        if ($qbv[$uid][$key]['class'] == $class) {
+          $has_class = true;
+        }
+      }
+      
+      //don't add a class if none of the shippers can ship it
+      if (!$has_class) unset($customer_quote[$class]);
+    }
+  }
+  
+  return array('customer_quote' => $customer_quote, 'seller_best' => $seller_best);
+}
+
+/*
+ * Helper function to classify a usps shipping type as:
+ *  first class
+ *  priority mail
+ *  express mail
+ *  first class intl
+ *  priority mail intl
+ *  global express intl
+ *  
+ */
+function mp_quote_usps_delivery_type($rate_key) {
+  $first_class = array('zeroParcel', 'zeroFlat');
+  $priority_mail = array('1', '28', '17', '22');
+  $express_mail = array('3', '23');
+  $first_class_intl = array('15');
+  $priority_mail_intl = array('2', '16', '9', '11');
+  $global_express_intl = array('4', '6', '7');
+  $class = '';
+  if (in_array($rate_key, $first_class)) {
+    $class = 'first class';
+  }
+  else if (in_array($rate_key, $priority_mail)) {
+    $class = 'priority mail';
+  }  
+  else if (in_array($rate_key, $express_mail)) {
+    $class = 'express mail';
+  }  
+  else if (in_array($rate_key, $first_class_intl)) {
+    $class = 'first class intl';
+  }  
+  else if (in_array($rate_key, $priority_mail_intl)) {
+    $class = 'priority mail intl';
+  }   
+  else if (in_array($rate_key, $global_express_intl)) {
+    $class = 'global express intl';
+  }  
+  
+  return $class;
+}
+
+/*
+ * Helper function to determine if a class of shipping fastet (more expensive)
+ *  than the givin class
+ * 
+ * @params $class the class type you are checking against
+ * @params $faster_than the class you are checking for
+ *  is $class faster than $fater_than
+ *  is 'first class' faster than 'priority mail' returns false;
+ *  first class
+ *  priority mail
+ *  express mail
+ *  first class intl
+ *  priority mail intl
+ *  global express intl
+ * 
+ * @return boolean 
+ */
+function mp_quote_is_faster_or_equal ($class, $faster_than) {
+  $speed= array(
+    'first class intl' => 30, 
+    'priority mail intl' => 10,   
+    'first class' => 7,
+    'global express intl' => 3,  
+    'priority mail' => 2,
+    'express mail' => 1,  
+  );
+  
+  if (!isset($speed[$class]) || !isset($speed[$faster_than])) return false; 
+  
+  return ($speed[$class] <= $speed[$faster_than]);
+}
+
+/*
+ * loop through $qbv and find the least expensive shipping type in each class
+ */
+function mp_quote_faster ($qbv, $class) {
+  $seller_best = array();
+  foreach ($qbv as $uid => $quote) {
+    foreach ($quote as $key => $rate) {
+      if ($key != 'data' && mp_quote_is_faster_or_equal($rate['class'], $class)) {
+        $seller_best[$uid] = $key;
+        //keys are sorted by price so the first one is the least expensive
+        break;
+      }  
+    }    
+  }  
+  return $seller_best;
+}
+
+/*
+ * Convert usps classes into labels
+ *  TODO turn this into a theme function
+ * 
+ *  first class
+ *  priority mail
+ *  express mail
+ *  first class intl
+ *  priority mail intl
+ *  global express intl 
+ */
+function mp_quote_label($class) {
+  switch ($class) {
+    case 'first class':
+      return t('U.S.P.S. First-Class Package Service™');
+    case 'priority mail':
+      return t('U.S.P.S. Priority Mail 2-Day™');
+    case 'express mail':  
+      return t('U.S.P.S. Priority Mail Express 1-Day™');
+    case 'first class intl':
+      return t('U.S.P.S. First-Class Package International Service™');
+    case 'priority mail intl':
+      return t('U.S.P.S. Priority Mail International® 6 to 10 business days');
+    case 'global express intl':
+      return t('U.S.P.S. Global Express®');
+  }
 }
 
 /**
@@ -332,10 +529,13 @@ function mp_quote_order($op, &$order, $arg2)  {
         mp_line_item_delete_line_item(null, $order->order_id, null, 'shipping');
       }
       if (isset($_SESSION['mp_quote_rate'])) {
-        foreach($_SESSION['mp_quote_rate'] as $uid=>$rate) {
-          db_query("INSERT INTO {mp_quote_shipping_rates} (uid, order_id, rate) VALUES (%d, %d, %f)", $uid, $order->order_id, $rate); 
+        $best = mp_quote_best($_SESSION['mp_quote_rate']);
+        $class = $order->quote['accessorials'];        
+        foreach($_SESSION['mp_quote_rate'] as $uid=>$quote) {
+          $rate = $quote[$best['seller_best'][$class][$uid]];
+          db_query("INSERT INTO {mp_quote_shipping_rates} (uid, order_id, rate) VALUES (%d, %d, %f)", $uid, $order->order_id, $rate['rate']); 
           if (module_exists('mp_line_item')) {
-            mp_line_item_line_item_add($order->order_id, $uid, 'shipping', t('Shipping'), $rate, 1);           
+            mp_line_item_line_item_add($order->order_id, $uid, 'shipping', $rate['label'], $rate['rate'], 1);           
           }
         }
       }
